@@ -4869,6 +4869,10 @@ build_lswitch_input_port_sec_op(
         return;
     }
 
+    if (!lsp_is_up(op->nbsp) && strcmp(op->nbsp->type, "localnet")) {
+        return;
+    }
+
     ds_clear(match);
     ds_clear(actions);
     ds_put_format(match, "inport == %s", op->json_key);
@@ -4923,7 +4927,7 @@ build_lswitch_output_port_sec(struct hmap *ports, struct hmap *datapaths,
      * they don't even receive multicast or broadcast packets.
      */
     HMAP_FOR_EACH (op, key_node, ports) {
-        if (!op->nbsp || lsp_is_external(op->nbsp)) {
+        if (!op->nbsp || lsp_is_external(op->nbsp) || (!lsp_is_up(op->nbsp) && strcmp(op->nbsp->type, "localnet"))) {
             continue;
         }
 
@@ -7259,7 +7263,7 @@ build_lswitch_flows(struct hmap *datapaths, struct hmap *ports,
 
     /* Ingress table 19: Destination lookup, unicast handling (priority 50), */
     HMAP_FOR_EACH (op, key_node, ports) {
-        if (!op->nbsp || lsp_is_external(op->nbsp)) {
+        if (!op->nbsp || lsp_is_external(op->nbsp)|| (!lsp_is_up(op->nbsp) && strcmp(op->nbsp->type, "localnet"))) {
             continue;
         }
 
@@ -10331,7 +10335,7 @@ build_arp_resolve_flows_for_lrouter_port(
         struct hmap *ports,
         struct ds *match, struct ds *actions)
 {
-    if (op->nbsp && !lsp_is_enabled(op->nbsp)) {
+    if (op->nbsp && (!lsp_is_enabled(op->nbsp) || (!lsp_is_up(op->nbsp) && strcmp(op->nbsp->type, "localnet")))) {
         return;
     }
 
