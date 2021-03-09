@@ -1,4 +1,5 @@
 usr/bin/ovn-northd
+usr/bin/ovn-ic
 usr/share/ovn/ovn-nb.ovsschema
 usr/share/ovn/ovn-sb.ovsschema
 usr/share/ovn/ovn-ic-nb.ovsschema
