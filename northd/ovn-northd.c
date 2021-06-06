@@ -5173,6 +5173,7 @@ build_pre_lb(struct ovn_datapath *od, struct hmap *lflows,
                                  110, lflows);
     }
 
+    struct sset all_ips_v4 = SSET_INITIALIZER(&all_ips_v4);
     bool vip_configured = false;
     for (int i = 0; i < od->nbs->n_load_balancer; i++) {
         struct nbrec_load_balancer *nb_lb = od->nbs->load_balancer[i];
@@ -5182,6 +5183,7 @@ build_pre_lb(struct ovn_datapath *od, struct hmap *lflows,
 
         for (size_t j = 0; j < lb->n_vips; j++) {
             struct ovn_lb_vip *lb_vip = &lb->vips[j];
+            sset_add(&all_ips_v4, lb_vip->vip_str);
             build_empty_lb_event_flow(od, lflows, lb_vip, nb_lb,
                                       S_SWITCH_IN_PRE_LB, meter_groups);
 
@@ -5195,37 +5197,18 @@ build_pre_lb(struct ovn_datapath *od, struct hmap *lflows,
     }
 
     /* 'REGBIT_CONNTRACK_DEFRAG' is set to let the pre-stateful table send
-     * packet to conntrack for defragmentation.
-     *
-     * Send all the packets to conntrack in the ingress pipeline if the
-     * logical switch has a load balancer with VIP configured. Earlier
-     * we used to set the REGBIT_CONNTRACK_DEFRAG flag in the ingress pipeline
-     * if the IP destination matches the VIP. But this causes few issues when
-     * a logical switch has no ACLs configured with allow-related.
-     * To understand the issue, lets a take a TCP load balancer -
-     * 10.0.0.10:80=10.0.0.3:80.
-     * If a logical port - p1 with IP - 10.0.0.5 opens a TCP connection with
-     * the VIP - 10.0.0.10, then the packet in the ingress pipeline of 'p1'
-     * is sent to the p1's conntrack zone id and the packet is load balanced
-     * to the backend - 10.0.0.3. For the reply packet from the backend lport,
-     * it is not sent to the conntrack of backend lport's zone id. This is fine
-     * as long as the packet is valid. Suppose the backend lport sends an
-     *  invalid TCP packet (like incorrect sequence number), the packet gets
-     * delivered to the lport 'p1' without unDNATing the packet to the
-     * VIP - 10.0.0.10. And this causes the connection to be reset by the
-     * lport p1's VIF.
-     *
-     * We can't fix this issue by adding a logical flow to drop ct.inv packets
-     * in the egress pipeline since it will drop all other connections not
-     * destined to the load balancers.
-     *
-     * To fix this issue, we send all the packets to the conntrack in the
-     * ingress pipeline if a load balancer is configured. We can now
-     * add a lflow to drop ct.inv packets.
-     */
-    if (vip_configured) {
+     * packet to conntrack for defragmentation. */
+    const char *ip_address;
+    SSET_FOR_EACH (ip_address, &all_ips_v4) {
+        char *match = xasprintf("ip && ip4.dst == %s", ip_address);
         ovn_lflow_add(lflows, od, S_SWITCH_IN_PRE_LB,
-                      100, "ip", REGBIT_CONNTRACK_DEFRAG" = 1; next;");
+                      100, match, REGBIT_CONNTRACK_DEFRAG" = 1; next;");
+        free(match);
+    }
+
+    sset_destroy(&all_ips_v4);
+
+    if (vip_configured) {
         ovn_lflow_add(lflows, od, S_SWITCH_OUT_PRE_LB,
                       100, "ip", REGBIT_CONNTRACK_DEFRAG" = 1; next;");
     }
