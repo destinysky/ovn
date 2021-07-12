@@ -5302,10 +5302,10 @@ build_acls(struct ovn_datapath *od, struct hmap *lflows,
          *
          * This is enforced at a higher priority than ACLs can be defined. */
         ovn_lflow_add(lflows, od, S_SWITCH_IN_ACL, UINT16_MAX,
-                      "ct.inv || (ct.est && ct.rpl && ct_label.blocked == 1)",
+                      "(ct.est && ct.rpl && ct_label.blocked == 1)",
                       "drop;");
         ovn_lflow_add(lflows, od, S_SWITCH_OUT_ACL, UINT16_MAX,
-                      "ct.inv || (ct.est && ct.rpl && ct_label.blocked == 1)",
+                      "(ct.est && ct.rpl && ct_label.blocked == 1)",
                       "drop;");
 
         /* Ingress and Egress ACL Table (Priority 65535).
@@ -7304,7 +7304,10 @@ build_route_match(const struct ovn_port *op_inport, const char *network_s,
      * routing. */
     if (is_src_route) {
         dir = "src";
-        *priority = plen * 2;
+        *priority = 1;
+        if ((is_ipv4 && plen == 32) || (plen == 128)) {
+            *priority = 2;
+        }
     } else {
         dir = "dst";
         *priority = (plen * 2) + 1;
