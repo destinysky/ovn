@@ -1931,7 +1931,7 @@ nbctl_lsp_pair_group_del_port_pair(struct ctl_context *ctx)
       }
     }
     if (must_exist) {
-	ctl_error(ctx, "logical port-pair %s is not part of any logical switch",
+        ctl_error(ctx, "logical port-pair %s is not part of any logical switch",
                   ctx->argv[1]);
         return;
     }
