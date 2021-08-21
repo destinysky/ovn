@@ -5702,7 +5702,7 @@ build_chain(struct ovn_datapath *od, struct hmap *lflows, struct hmap *ports)
 
     char *lcc_match = NULL;
     char *lcc_action = NULL;
-    // char *target_port_name;
+    char *target_port_name;
     struct ovn_port *traffic_port;
     unsigned int chain_direction = 2;
     unsigned int chain_path = 2;
@@ -6067,6 +6067,35 @@ build_chain(struct ovn_datapath *od, struct hmap *lflows, struct hmap *ports)
             ds_destroy(&actions_l2);
         }
 
+        /* Exclude ARP and ND */
+        struct ds actions_ex = DS_EMPTY_INITIALIZER;
+        if (chain_path == 0) {
+            if (strcmp(chain_match, "") != 0) {  /* Path starting from entry port */
+                lcc_match =  xasprintf(
+                                 "eth.src == "ETH_ADDR_FMT" && (arp || nd) && %s",
+                                 ETH_ADDR_ARGS(traffic_logical_port_ea), chain_match);
+
+            } else {
+                lcc_match =  xasprintf(
+                                 "eth.src == "ETH_ADDR_FMT" && (arp || nd)",
+                                 ETH_ADDR_ARGS(traffic_logical_port_ea));
+            }
+        } else { /* Path starting from exit port */
+            if (strcmp(chain_match, "") != 0) {
+                lcc_match =  xasprintf(
+                                 "eth.dst == "ETH_ADDR_FMT" && (arp || nd) && %s",
+                                 ETH_ADDR_ARGS(traffic_logical_port_ea), chain_match);
+            } else {
+                lcc_match =  xasprintf(
+                                 "eth.dst == "ETH_ADDR_FMT" && (arp || nd)",
+                                 ETH_ADDR_ARGS(traffic_logical_port_ea));
+            }
+        }
+        ds_put_format(&actions_ex, "next;");
+        ovn_lflow_add(lflows, od, S_SWITCH_IN_CHAIN, 200,
+                      lcc_match, ds_cstr(&actions_ex));
+        free(lcc_match);
+        ds_destroy(&actions_ex);
 
         /* bi-directional chain (Response)*/
         if (chain_direction == 1) {
@@ -6305,6 +6334,36 @@ build_chain(struct ovn_datapath *od, struct hmap *lflows, struct hmap *ports)
                 free(lcc_match);
                 ds_destroy(&new_actions_l2);
             }
+
+            /* Exclude ARP and ND */
+            struct ds new_actions_ex = DS_EMPTY_INITIALIZER;
+            if (chain_path == 0) { /* Path starting from exit port */
+                if (strcmp(chain_match, "") != 0) {  
+                    lcc_match =  xasprintf(
+                                    "eth.dst == "ETH_ADDR_FMT" && (arp || nd) && %s",
+                                    ETH_ADDR_ARGS(traffic_logical_port_ea), chain_match);
+
+                } else {
+                    lcc_match =  xasprintf(
+                                    "eth.dst == "ETH_ADDR_FMT" && (arp || nd)",
+                                    ETH_ADDR_ARGS(traffic_logical_port_ea));
+                }
+            } else { /* Path starting from entry port */
+                if (strcmp(chain_match, "") != 0) {
+                    lcc_match =  xasprintf(
+                                    "eth.src == "ETH_ADDR_FMT" && (arp || nd) && %s",
+                                    ETH_ADDR_ARGS(traffic_logical_port_ea), chain_match);
+                } else {
+                    lcc_match =  xasprintf(
+                                    "eth.src == "ETH_ADDR_FMT" && (arp || nd)",
+                                    ETH_ADDR_ARGS(traffic_logical_port_ea));
+                }
+            }
+            ds_put_format(&new_actions_ex, "next;");
+            ovn_lflow_add(lflows, od, S_SWITCH_IN_CHAIN, 200,
+                        lcc_match, ds_cstr(&new_actions_ex));
+            free(lcc_match);
+            ds_destroy(&new_actions_ex);
         }
         free(input_port_array);
         free(output_port_array);
