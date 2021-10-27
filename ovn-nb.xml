@@ -519,13 +519,10 @@
         be used as the unique identifier.
       </p>
     </column>
-    <column name="port">
+    <column name="priority">
       <p>
-        The logical port that is either the src or dst of flows for the
-        port chain.
-      </p>
-      <p>
-        It is an error for this to be NULL.
+        Priority of the classifier. Classifier with highest priority will be
+        matched in prior.
       </p>
     </column>
     <column name="chain">
@@ -534,30 +531,38 @@
         reused in multiple classifiers.
       </p>
     </column>
-    <column name="direction">
+    <column name="entry_port">
       <p>
-        The direction of the flows through the port chain, this can be either
-        "uni-directional" or "bi-directional".
+        The logical port that is src of flows for the port chain.
+      </p>
+       <p>
+        Optional. But at least one condiction among entry_port, exit_port, and 
+        match is required.
       </p>
     </column>
-    <column name="path">
+    <column name="exit_port">
       <p>
-       The path of the flow from or to the logical port. The valid values are
-       "entry-lport" or "exit-lport". If the path is "entry-lport" the rules
-       are applied to traffic leaving the entry-lport, if the path is
-       "exit-lport" the port-chain is applied to traffic going to the lport.
+        The logical port that is dst of flows for the port chain.
+      </p>
+       <p>
+        Optional. But at least one condiction among entry_port, exit_port, and 
+        match is required.
       </p>
     </column>
     <column name="match">
       <p>
-       The match is an optional match statement that will filter flows going
+       The match is a match statement that will filter flows going
        to the chain as defined by any valid openvswitch matches.
       </p>
       <p>
         Care should be taken using match statements to ensure they do not
         conflicit with in logical port the is the src or dst of flows. In
-        addition when operating on "bi-directional" flows care shoudl be taken
+        addition when operating on "bi-directional" flows care should be taken
         to only use match statements that work in both directions.
+      </p>
+      <p>
+        Optional. But at least one condiction among entry_port, exit_port, and 
+        match is required.
       </p>
     </column>
     <group title="Common Columns">
@@ -649,6 +654,12 @@
     <column name="inport">
       <p>
         In logical port for this port pair.
+      </p>
+    </column>
+    <column name="weight">
+      <p>
+        Weight for load balancing of input ports while there are multiple 
+        logical port pairs in a logical port pair group. Default 1.
       </p>
     </column>
     <group title="Common Columns">

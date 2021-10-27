@@ -94,6 +94,7 @@ struct ovn_extend_table;
     OVNACT(BIND_VPORT,        ovnact_bind_vport)       \
     OVNACT(HANDLE_SVC_CHECK,  ovnact_handle_svc_check) \
     OVNACT(FWD_GROUP,         ovnact_fwd_group)       \
+    OVNACT(FWD_GROUP_WEIGHT,  ovnact_fwd_group_weight) \
     OVNACT(DHCP6_REPLY,       ovnact_null)
 
 /* enum ovnact_type, with a member OVNACT_<ENUM> for each action. */
@@ -401,6 +402,21 @@ struct ovnact_fwd_group {
     char **child_ports;       /* Logical ports */
     size_t n_child_ports;
     uint8_t ltable;           /* Logical table ID of next table. */
+};
+
+struct ovnact_port_weight {
+    char *child_port;       /* Logical ports */
+    uint16_t weight;
+};
+
+/* OVNACT_FWD_GROUP_WEIGHT. */
+struct ovnact_fwd_group_weight {
+    struct ovnact ovnact;
+    bool liveness;
+    struct ovnact_port_weight *child_ports_weight;   
+    size_t n_child_ports;
+    uint8_t ltable;           /* Logical table ID of next table. */
+    char *hash_fields;        /* hash type: hash or dp_hash. */
 };
 
 /* Internal use by the helpers below. */

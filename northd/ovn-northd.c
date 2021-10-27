@@ -5684,16 +5684,17 @@ build_chain(struct ovn_datapath *od, struct hmap *lflows, struct hmap *ports)
      *     * Support visiting the same VNF more than once
      *     * Unit tests!
      */
-    const uint16_t ingress_inner_priority = 150;
-    const uint16_t ingress_outer_priority = 100;
-    const uint16_t egress_inner_priority = 150;
-    const uint16_t egress_outer_priority = 100;
+    const uint16_t exclude_arp_nd = 65535;
+    const uint16_t ingress_inner_priority = 32768;
+    const uint16_t ingress_outer_priority = 1;
+    const uint16_t egress_inner_priority = 32768;
+    const uint16_t egress_outer_priority = 1;
 
-    struct ovn_port **input_port_array = NULL;
-    struct ovn_port **output_port_array = NULL;
+    struct ovn_port ***input_port_array = NULL;
+    struct ovn_port ***output_port_array = NULL;
 
-    // struct ovn_port *dst_port = NULL;
-    // struct ovn_port *src_port = NULL;
+    struct ovn_port *dst_port = NULL;
+    struct ovn_port *src_port = NULL;
 
     struct nbrec_logical_port_chain *lpc;
     struct nbrec_logical_port_pair_group *lppg;
@@ -5702,11 +5703,7 @@ build_chain(struct ovn_datapath *od, struct hmap *lflows, struct hmap *ports)
 
     char *lcc_match = NULL;
     char *lcc_action = NULL;
-    char *target_port_name;
-    struct ovn_port *traffic_port;
-    unsigned int chain_direction = 2;
-    unsigned int chain_path = 2;
-    char * chain_match = NULL;
+    char *chain_match = NULL;
 
     /* Ingress table ls_in_chain: default to passing through to the next table
      * (priority 0)
@@ -5723,16 +5720,28 @@ build_chain(struct ovn_datapath *od, struct hmap *lflows, struct hmap *ports)
         lcc = od->nbs->port_chain_classifiers[i];
         /* Get the parameters from the classifier */
         lpc = lcc->chain;
-        traffic_port =  ovn_port_find(ports, lcc->port->name);
-        target_port_name = traffic_port->key;
-        if (traffic_port == NULL) {
-            static struct vlog_rate_limit rl =
-                VLOG_RATE_LIMIT_INIT(1, 1);
-            VLOG_WARN_RL(&rl,
-                         "Traffic port %s does not exist\n",
-                         lcc->port->name);
-            break;
+        const uint16_t priority = lcc->priority;
+        if (lcc->entry_port){
+            src_port =  ovn_port_find(ports, lcc->entry_port->name);
+            if (src_port == NULL) {
+                static struct vlog_rate_limit rl = VLOG_RATE_LIMIT_INIT(1, 1);
+                VLOG_WARN_RL(&rl,
+                            "Entry port %s does not exist\n",
+                            lcc->entry_port->name);
+                break;
+            }
         }
+        if (lcc->exit_port){
+            dst_port =  ovn_port_find(ports, lcc->exit_port->name);
+            if (dst_port == NULL) {
+                static struct vlog_rate_limit rl = VLOG_RATE_LIMIT_INIT(1, 1);
+                VLOG_WARN_RL(&rl,
+                            "Exit port %s does not exist\n",
+                            lcc->exit_port->name);
+                break;
+            }
+        }
+
         /*
         * Check chain has one or more groups
         */
@@ -5746,57 +5755,72 @@ build_chain(struct ovn_datapath *od, struct hmap *lflows, struct hmap *ports)
             break;
         }
         /*
-        * Get ethernet address of target port
+        * Get ethernet address of entry and exit ports
         */
-        struct eth_addr traffic_logical_port_ea;
-        //ovs_be32 traffic_logical_port_ip;
+        struct eth_addr entry_logical_port_ea, exit_logical_port_ea;
         VLOG_INFO("Checking ports \n");
-        //VLOG_INFO("Addresses: %s\n", traffic_port->nbsp);
-        if (traffic_port->nbsp->addresses == NULL){
-            static struct vlog_rate_limit rl =
-                VLOG_RATE_LIMIT_INIT(1, 1);
-            VLOG_WARN_RL(&rl,
-                         "MAC Address not set for : %s used in classifier: %s does not not "
-                         "have any port pair groups\n",
-                         lcc->chain->name, lcc->name);
-            break;
+
+        if (src_port)
+        {
+            if (src_port->nbsp->addresses == NULL){
+                static struct vlog_rate_limit rl = VLOG_RATE_LIMIT_INIT(1, 1);
+                VLOG_WARN_RL(&rl,
+                            "MAC Address not set for : %s used in classifier: %s does not not "
+                            "have any port pair groups\n",
+                            lcc->chain->name, lcc->name);
+                break;
+            }
+
+            if (ovs_scan(src_port->nbsp->addresses[0],
+                    ETH_ADDR_SCAN_FMT,
+                    ETH_ADDR_SCAN_ARGS(entry_logical_port_ea))){
+                    VLOG_INFO("Static address set\n");
+            } else if (is_dynamic_lsp_address(src_port->nbsp->addresses[0])) {
+                ovs_scan(src_port->nbsp->dynamic_addresses,
+                    ETH_ADDR_SCAN_FMT,
+                    ETH_ADDR_SCAN_ARGS(entry_logical_port_ea));
+            } else {
+                static struct vlog_rate_limit rl =
+                            VLOG_RATE_LIMIT_INIT(1, 1);
+                VLOG_WARN_RL(&rl,"Invalid Port Type for Service Chain Port\n");
+            }
         }
 
-        if (ovs_scan(traffic_port->nbsp->addresses[0],
-                 ETH_ADDR_SCAN_FMT,
-                 ETH_ADDR_SCAN_ARGS(traffic_logical_port_ea))){
-                 VLOG_INFO("Static address set\n");
-        } else if (is_dynamic_lsp_address(traffic_port->nbsp->addresses[0])) {
-            ovs_scan(traffic_port->nbsp->dynamic_addresses,
-                 ETH_ADDR_SCAN_FMT,
-                 ETH_ADDR_SCAN_ARGS(traffic_logical_port_ea));
-        } else {
-            static struct vlog_rate_limit rl =
-                        VLOG_RATE_LIMIT_INIT(1, 1);
-            VLOG_WARN_RL(&rl,"Invalid Port Type for Service Chain Port\n");
-        }
+        if (dst_port)
+        {
+            if (dst_port->nbsp->addresses == NULL){
+                static struct vlog_rate_limit rl = VLOG_RATE_LIMIT_INIT(1, 1);
+                VLOG_WARN_RL(&rl,
+                            "MAC Address not set for : %s used in classifier: %s does not not "
+                            "have any port pair groups\n",
+                            lcc->chain->name, lcc->name);
+                break;
+            }
 
-        /* Set the port to use as source or destination. */
-        if (strcmp(lcc->direction, "entry-lport") == 0) {
-            chain_path = 0;
-        } else {
-            chain_path = 1;
-        }
-        /* Set the direction of the port-chain. */
-        if (strcmp(lcc->path, "uni-directional") == 0) {
-            chain_direction = 0;
-        } else {
-            chain_direction = 1;
+            if (ovs_scan(dst_port->nbsp->addresses[0],
+                    ETH_ADDR_SCAN_FMT,
+                    ETH_ADDR_SCAN_ARGS(exit_logical_port_ea))){
+                    VLOG_INFO("Static address set\n");
+            } else if (is_dynamic_lsp_address(dst_port->nbsp->addresses[0])) {
+                ovs_scan(dst_port->nbsp->dynamic_addresses,
+                    ETH_ADDR_SCAN_FMT,
+                    ETH_ADDR_SCAN_ARGS(exit_logical_port_ea));
+            } else {
+                static struct vlog_rate_limit rl =
+                            VLOG_RATE_LIMIT_INIT(1, 1);
+                VLOG_WARN_RL(&rl,"Invalid Port Type for Service Chain Port\n");
+            }
         }
         /* Set the match parameters. */
         chain_match = lcc->match;
         /*
          * Allocate space for port-pairs.
          */
-        input_port_array = xmalloc(sizeof(struct ovn_port) *
+        input_port_array = xmalloc(sizeof(struct ovn_port*) *
                                     lpc->n_port_pair_groups);
-        output_port_array = xmalloc(sizeof(struct ovn_port) *
+        output_port_array = xmalloc(sizeof(struct ovn_port*) *
                                     lpc->n_port_pair_groups);
+        int n_port_array[lpc->n_port_pair_groups];
         /* Copy port groups from chain and sort them according to sortkey.*/
         struct nbrec_logical_port_pair_group **port_pair_groups =
             xmemdup(lpc->port_pair_groups,
@@ -5808,24 +5832,37 @@ build_chain(struct ovn_datapath *od, struct hmap *lflows, struct hmap *ports)
         /* For each port-pair-group in a port chain pull out the port-pairs.*/
         for (size_t j = 0; j < lpc->n_port_pair_groups; j++) {
             lppg = port_pair_groups[j];
+            input_port_array[j] = xmalloc(sizeof(struct ovn_port) *
+                                    lppg->n_port_pairs);
+            output_port_array[j] = xmalloc(sizeof(struct ovn_port) *
+                                    lppg->n_port_pairs);
+            n_port_array[j] = lppg->n_port_pairs;
             for (size_t k = 0; k < lppg->n_port_pairs; k++) {
                 /* TODO: Need to add load balancing logic when LB becomes
                 * available. Until LB is available just take the first
                 * PP in the PPG. */
-                if (k > 0) {
-                    static struct vlog_rate_limit rl =
-                        VLOG_RATE_LIMIT_INIT(1, 1);
-                    VLOG_WARN_RL(&rl,
-                                 "Currently lacking support for more than \
-                            one port-pair %"PRIuSIZE"\n",
-                                 lppg->n_port_pairs);
-                    break;
-                }
+                
                 lpp = lppg->port_pairs[k];
-                input_port_array[j] = lpp->inport ? ovn_port_find(ports,
+                input_port_array[j][k] = lpp->inport ? ovn_port_find(ports,
                                       lpp->inport->name) : NULL;
-                output_port_array[j] = lpp->outport ? ovn_port_find(ports,
+                if (input_port_array[j][k] == NULL){
+                    static struct vlog_rate_limit rl =
+                    VLOG_RATE_LIMIT_INIT(1, 1);
+                    VLOG_WARN_RL(&rl,
+                                "Inport of logical port pair %s does not exist\n",
+                                lpp->name);
+                    return;
+                }
+                output_port_array[j][k] = lpp->outport ? ovn_port_find(ports,
                                        lpp->outport->name) : NULL;
+                if (output_port_array[j][k] == NULL){
+                    static struct vlog_rate_limit rl =
+                    VLOG_RATE_LIMIT_INIT(1, 1);
+                    VLOG_WARN_RL(&rl,
+                                "Outport of logical port pair %s does not exist\n",
+                                lpp->name);
+                    return;
+                }
             }
             /* At this point we need to determine the final hop port to add to
              * the chain. This defines the complete path for packets through
@@ -5836,85 +5873,355 @@ build_chain(struct ovn_datapath *od, struct hmap *lflows, struct hmap *ports)
         * entry points into the chain in either direction. The match statement
         * is used to filter the entry port to provide higher granularity of
         * filtering.
-        */
-        if (chain_path == 0) {
-            if (strcmp(chain_match, "") != 0) {  /* Path starting from entry port */
-                lcc_match =  xasprintf(
-                                 "eth.src == "ETH_ADDR_FMT" && %s",
-                                 ETH_ADDR_ARGS(traffic_logical_port_ea), chain_match);
-
-            } else {
-                lcc_match =  xasprintf(
-                                 "eth.src == "ETH_ADDR_FMT,
-                                 ETH_ADDR_ARGS(traffic_logical_port_ea));
-            }
-            //lcc_action = xasprintf("outport = %s; output;",
-            //                       input_port_array[0]->json_key);
-        } else { /* Path starting from exit port */
-            if (strcmp(chain_match, "") != 0) {
-                lcc_match =  xasprintf(
-                                 "eth.dst == "ETH_ADDR_FMT" && %s",
-                                 ETH_ADDR_ARGS(traffic_logical_port_ea), chain_match);
-            } else {
-                lcc_match =  xasprintf(
-                                 "eth.dst == "ETH_ADDR_FMT,
-                                 ETH_ADDR_ARGS(traffic_logical_port_ea));
-            }
-            //lcc_action = xasprintf("outport = %s; output;",
-            //                       output_port_array[lpc->n_port_pair_groups - 1]->json_key);
-        }
-        lcc_action = xasprintf("outport = %s; output;",
-                                input_port_array[0]->json_key);
-        ovn_lflow_add(lflows, od, S_SWITCH_IN_CHAIN, ingress_outer_priority,
-                      lcc_match, lcc_action);
-        free(lcc_match);
-        free(lcc_action);
-        /*
         * For last VNF send the flow back to the original chassis and exit from
         * there.
         */
-        struct ds actions = DS_EMPTY_INITIALIZER;
+       if (src_port && dst_port) {
 
-        if (chain_path == 0) { /* Path starting from entry port. */
-            if (strcmp(chain_match, "") != 0) {
-                lcc_match = xasprintf(
-                                "eth.src == "ETH_ADDR_FMT" && inport == %s && %s",
-                                ETH_ADDR_ARGS(traffic_logical_port_ea),
-                                output_port_array[lpc->n_port_pair_groups - 1]->json_key,
-                                chain_match);
-                //ds_put_format(&actions, "next;");
-                //ovn_lflow_add(lflows, od, S_SWITCH_IN_CHAIN, ingress_inner_priority,
-                //              lcc_match, ds_cstr(&actions));
-            } else{
-                lcc_match = xasprintf(
-                                "eth.src == "ETH_ADDR_FMT" && inport == %s",
-                                ETH_ADDR_ARGS(traffic_logical_port_ea),
-                                output_port_array[lpc->n_port_pair_groups - 1]->json_key);
+           /* Path starting from entry port, ingress table */
+           if (strcmp(chain_match, "") != 0) {  
+                lcc_match =  xasprintf(
+                                    "eth.src == "ETH_ADDR_FMT" && eth.dst == "ETH_ADDR_FMT" && inport == %s && %s",
+                                    ETH_ADDR_ARGS(entry_logical_port_ea),
+                                    ETH_ADDR_ARGS(exit_logical_port_ea),
+                                    src_port ->json_key, chain_match);
+            } else {
+                lcc_match =  xasprintf(
+                                    "eth.src == "ETH_ADDR_FMT" && eth.dst == "ETH_ADDR_FMT" && inport == %s",
+                                    ETH_ADDR_ARGS(entry_logical_port_ea),
+                                    ETH_ADDR_ARGS(exit_logical_port_ea),
+                                    src_port ->json_key);
             }
-        } else { /* Path starting from exit port */
-            if (strcmp(chain_match, "") != 0) {
-                lcc_match = xasprintf(
-                                "eth.dst == "ETH_ADDR_FMT" && inport == %s && %s",
-                                ETH_ADDR_ARGS(traffic_logical_port_ea),
-                                output_port_array[lpc->n_port_pair_groups - 1]->json_key,
-                                chain_match);
-                                //input_port_array[0]->json_key);
-                //ds_put_format(&actions, "next;");
-                //ovn_lflow_add(lflows, od, S_SWITCH_IN_CHAIN, ingress_inner_priority,
-                //              lcc_match, ds_cstr(&actions));
-            } else{
-                lcc_match = xasprintf(
-                                "eth.dst == "ETH_ADDR_FMT" && inport == %s",
-                                ETH_ADDR_ARGS(traffic_logical_port_ea),
-                                output_port_array[lpc->n_port_pair_groups - 1]->json_key);
+
+            if (n_port_array[0] > 1)
+            {
+                lppg = port_pair_groups[0];
+                struct ds group_ports = DS_EMPTY_INITIALIZER;
+                ds_put_cstr(&group_ports, "childports=");
+                for (size_t k = 0; k < lppg->n_port_pairs - 1; k++) {
+                    lpp = lppg->port_pairs[k];
+                    ds_put_format(&group_ports, "\"%s\":%"PRId64",", lpp->inport->name, lpp->weight);
+                }
+                lpp = lppg->port_pairs[lppg->n_port_pairs - 1];
+                ds_put_format(&group_ports, "\"%s\":%"PRId64,
+                      lpp->inport->name, lpp->weight);
+
+                struct ds actions = DS_EMPTY_INITIALIZER;
+                ds_put_format(&actions, "fwd_group_weight(%s);", ds_cstr(&group_ports));
+                ovn_lflow_add(lflows, od, S_SWITCH_IN_CHAIN, ingress_outer_priority + priority,
+                                lcc_match, ds_cstr(&actions));
+
+                free(lcc_match);
+                ds_destroy(&actions);
+                ds_destroy(&group_ports);
+                
+            } else {
+                lcc_action = xasprintf("outport = %s; output;",
+                                 input_port_array[0][0]->json_key);
+                ovn_lflow_add(lflows, od, S_SWITCH_IN_CHAIN, ingress_outer_priority + priority,
+                      lcc_match, lcc_action);
+                free(lcc_match);
+                free(lcc_action);
+            }
+
+            /* Path starting from entry port, egress table */
+            for (size_t k = 0; k < n_port_array[0] ; k++) {
+                if (strcmp(chain_match, "") != 0) {
+                    lcc_match =  xasprintf(
+                                        "eth.src == "ETH_ADDR_FMT" && eth.dst == "ETH_ADDR_FMT" && inport == %s && outport == %s && %s",
+                                        ETH_ADDR_ARGS(entry_logical_port_ea),
+                                        ETH_ADDR_ARGS(exit_logical_port_ea),
+                                        src_port ->json_key, 
+                                        input_port_array[0][k]->json_key,
+                                        chain_match);
+                } else {
+                    lcc_match =  xasprintf(
+                                        "eth.src == "ETH_ADDR_FMT" && eth.dst == "ETH_ADDR_FMT" && inport == %s && outport == %s",
+                                        ETH_ADDR_ARGS(entry_logical_port_ea),
+                                        ETH_ADDR_ARGS(exit_logical_port_ea),
+                                        src_port ->json_key,
+                                        input_port_array[0][k]->json_key);
+                }
+                lcc_action = xasprintf("output;");
+                ovn_lflow_add(lflows, od, S_SWITCH_OUT_CHAIN, egress_outer_priority + priority,
+                    lcc_match, lcc_action);
+                free(lcc_match);
+                free(lcc_action);
+            }
+
+            /* Path to exit port, ingress table */
+            for (size_t k = 0; k < n_port_array[lpc->n_port_pair_groups-1] ; k++) {
+                if (strcmp(chain_match, "") != 0) {  
+                    lcc_match =  xasprintf(
+                                        "eth.src == "ETH_ADDR_FMT" && eth.dst == "ETH_ADDR_FMT" && inport == %s && %s",
+                                        ETH_ADDR_ARGS(entry_logical_port_ea),
+                                        ETH_ADDR_ARGS(exit_logical_port_ea),
+                                        output_port_array[lpc->n_port_pair_groups-1][k] ->json_key, chain_match);
+                } else {
+                    lcc_match =  xasprintf(
+                                        "eth.src == "ETH_ADDR_FMT" && eth.dst == "ETH_ADDR_FMT" && inport == %s",
+                                        ETH_ADDR_ARGS(entry_logical_port_ea),
+                                        ETH_ADDR_ARGS(exit_logical_port_ea),
+                                        output_port_array[lpc->n_port_pair_groups-1][k] ->json_key);
+                }
+                lcc_action = xasprintf("outport = %s; output;",
+                                 dst_port->json_key);
+                ovn_lflow_add(lflows, od, S_SWITCH_IN_CHAIN, ingress_outer_priority + priority,
+                      lcc_match, lcc_action);
+                free(lcc_match);
+                free(lcc_action);
+            }
+
+            /* Path to exit port, egress table */
+            for (size_t k = 0; k < n_port_array[lpc->n_port_pair_groups-1] ; k++) {
+                if (strcmp(chain_match, "") != 0) {  
+                    lcc_match =  xasprintf(
+                                        "eth.src == "ETH_ADDR_FMT" && eth.dst == "ETH_ADDR_FMT" && inport == %s && outport == %s && %s",
+                                        ETH_ADDR_ARGS(entry_logical_port_ea),
+                                        ETH_ADDR_ARGS(exit_logical_port_ea),
+                                        output_port_array[lpc->n_port_pair_groups-1][k] ->json_key, 
+                                        dst_port->json_key,
+                                        chain_match);
+                } else {
+                    lcc_match =  xasprintf(
+                                        "eth.src == "ETH_ADDR_FMT" && eth.dst == "ETH_ADDR_FMT" && inport == %s && outport == %s",
+                                        ETH_ADDR_ARGS(entry_logical_port_ea),
+                                        ETH_ADDR_ARGS(exit_logical_port_ea),
+                                        output_port_array[lpc->n_port_pair_groups-1][k] ->json_key,
+                                        dst_port->json_key);
+                }
+                lcc_action = xasprintf("output;");
+                ovn_lflow_add(lflows, od, S_SWITCH_OUT_CHAIN, egress_outer_priority + priority,
+                    lcc_match, lcc_action);
+                free(lcc_match);
+                free(lcc_action);
+            }
+
+
+
+
+        } else if (src_port && !dst_port) {
+           /* Path starting from entry port, ingress */
+            if (strcmp(chain_match, "") != 0) {  
+                lcc_match =  xasprintf(
+                                    "eth.src == "ETH_ADDR_FMT" && inport == %s && %s",
+                                    ETH_ADDR_ARGS(entry_logical_port_ea), src_port ->json_key, chain_match);
+            } else {
+                lcc_match =  xasprintf(
+                                    "eth.src == "ETH_ADDR_FMT" && inport == %s",
+                                    ETH_ADDR_ARGS(entry_logical_port_ea), src_port ->json_key);
+            }
+
+            if (n_port_array[0] > 1)
+            {
+                lppg = port_pair_groups[0];
+                struct ds group_ports = DS_EMPTY_INITIALIZER;
+                ds_put_cstr(&group_ports, "childports=");
+                for (size_t k = 0; k < lppg->n_port_pairs - 1; k++) {
+                    lpp = lppg->port_pairs[k];
+                    ds_put_format(&group_ports, "\"%s\":%"PRId64",", lpp->inport->name, lpp->weight);
+                }
+                lpp = lppg->port_pairs[lppg->n_port_pairs - 1];
+                ds_put_format(&group_ports, "\"%s\":%"PRId64,
+                      lpp->inport->name, lpp->weight);
+
+                struct ds actions = DS_EMPTY_INITIALIZER;
+                ds_put_format(&actions, "fwd_group_weight(%s);", ds_cstr(&group_ports));
+                ovn_lflow_add(lflows, od, S_SWITCH_IN_CHAIN, ingress_outer_priority + priority,
+                                lcc_match, ds_cstr(&actions));
+                free(lcc_match);
+                ds_destroy(&actions);
+                ds_destroy(&group_ports);
+            } else {
+                lcc_action = xasprintf("outport = %s; output;",
+                                 input_port_array[0][0]->json_key);
+                ovn_lflow_add(lflows, od, S_SWITCH_IN_CHAIN, ingress_outer_priority + priority,
+                      lcc_match, lcc_action);
+                free(lcc_match);
+                free(lcc_action);
+            }
+
+            /* Path starting from entry port, egress table */
+            for (size_t k = 0; k < n_port_array[0] ; k++) {
+                if (strcmp(chain_match, "") != 0) {
+                    lcc_match =  xasprintf(
+                                        "eth.src == "ETH_ADDR_FMT" && inport == %s && outport == %s && %s",
+                                        ETH_ADDR_ARGS(entry_logical_port_ea),
+                                        src_port ->json_key, 
+                                        input_port_array[0][k]->json_key,
+                                        chain_match);
+                } else {
+                    lcc_match =  xasprintf(
+                                        "eth.src == "ETH_ADDR_FMT" && inport == %s && outport == %s",
+                                        ETH_ADDR_ARGS(entry_logical_port_ea),
+                                        src_port ->json_key,
+                                        input_port_array[0][k]->json_key);
+                }
+                lcc_action = xasprintf("output;");
+                ovn_lflow_add(lflows, od, S_SWITCH_OUT_CHAIN, egress_outer_priority + priority,
+                    lcc_match, lcc_action);
+                free(lcc_match);
+                free(lcc_action);
+            }
+
+        } else if (!src_port && dst_port) {
+            /* Path starting from entry port, ingress */
+            if (strcmp(chain_match, "") != 0) { 
+                lcc_match =  xasprintf(
+                                    "eth.dst == "ETH_ADDR_FMT" && %s",
+                                    ETH_ADDR_ARGS(exit_logical_port_ea), chain_match);
+            } else {
+                lcc_match =  xasprintf(
+                                    "eth.dst == "ETH_ADDR_FMT,
+                                    ETH_ADDR_ARGS(exit_logical_port_ea));
+            }
+
+            if (n_port_array[0] > 1)
+            {
+                lppg = port_pair_groups[0];
+                struct ds group_ports = DS_EMPTY_INITIALIZER;
+                ds_put_cstr(&group_ports, "childports=");
+                for (size_t k = 0; k < lppg->n_port_pairs - 1; k++) {
+                    lpp = lppg->port_pairs[k];
+                    ds_put_format(&group_ports, "\"%s\":%"PRId64",", lpp->inport->name, lpp->weight);
+                }
+                lpp = lppg->port_pairs[lppg->n_port_pairs - 1];
+                ds_put_format(&group_ports, "\"%s\":%"PRId64,
+                      lpp->inport->name, lpp->weight);
+
+                struct ds actions = DS_EMPTY_INITIALIZER;
+                ds_put_format(&actions, "fwd_group_weight(%s);", ds_cstr(&group_ports));
+                ovn_lflow_add(lflows, od, S_SWITCH_IN_CHAIN, ingress_outer_priority + priority,
+                                lcc_match, ds_cstr(&actions));
+                free(lcc_match);
+                ds_destroy(&actions);
+                ds_destroy(&group_ports);
+            } else {
+                lcc_action = xasprintf("outport = %s; output;",
+                                 input_port_array[0][0]->json_key);
+                ovn_lflow_add(lflows, od, S_SWITCH_IN_CHAIN, ingress_outer_priority + priority,
+                      lcc_match, lcc_action);
+                free(lcc_match);
+                free(lcc_action);
+            }
+
+            /* Path starting from entry port, egress table */
+            for (size_t k = 0; k < n_port_array[0] ; k++) {
+                if (strcmp(chain_match, "") != 0) {
+                    lcc_match =  xasprintf(
+                                        "eth.dst == "ETH_ADDR_FMT" && outport == %s && %s",
+                                        ETH_ADDR_ARGS(exit_logical_port_ea),
+                                        input_port_array[0][k]->json_key,
+                                        chain_match);
+                } else {
+                    lcc_match =  xasprintf(
+                                        "eth.dst == "ETH_ADDR_FMT" && outport == %s",
+                                        ETH_ADDR_ARGS(exit_logical_port_ea),
+                                        input_port_array[0][k]->json_key);
+                }
+                lcc_action = xasprintf("output;");
+                ovn_lflow_add(lflows, od, S_SWITCH_OUT_CHAIN, egress_outer_priority + priority,
+                    lcc_match, lcc_action);
+                free(lcc_match);
+                free(lcc_action);
+            }
+
+            /* Path to exit port, ingress table */
+            for (size_t k = 0; k < n_port_array[lpc->n_port_pair_groups-1] ; k++) {
+                if (strcmp(chain_match, "") != 0) {  
+                    lcc_match =  xasprintf(
+                                        "eth.dst == "ETH_ADDR_FMT" && inport == %s && %s",
+                                        ETH_ADDR_ARGS(exit_logical_port_ea),
+                                        output_port_array[lpc->n_port_pair_groups-1][k] ->json_key, chain_match);
+                } else {
+                    lcc_match =  xasprintf(
+                                        "eth.dst == "ETH_ADDR_FMT" && inport == %s",
+                                        ETH_ADDR_ARGS(exit_logical_port_ea),
+                                        output_port_array[lpc->n_port_pair_groups-1][k] ->json_key);
+                }
+                lcc_action = xasprintf("outport = %s; output;",
+                                 dst_port->json_key);
+                ovn_lflow_add(lflows, od, S_SWITCH_IN_CHAIN, ingress_outer_priority + priority,
+                      lcc_match, lcc_action);
+                free(lcc_match);
+                free(lcc_action);
+            }
+
+            /* Path to exit port, egress table */
+            for (size_t k = 0; k < n_port_array[lpc->n_port_pair_groups-1] ; k++) {
+                if (strcmp(chain_match, "") != 0) {  
+                    lcc_match =  xasprintf(
+                                        "eth.dst == "ETH_ADDR_FMT" && inport == %s && outport == %s && %s",
+                                        ETH_ADDR_ARGS(exit_logical_port_ea),
+                                        output_port_array[lpc->n_port_pair_groups-1][k] ->json_key, 
+                                        dst_port->json_key,
+                                        chain_match);
+                } else {
+                    lcc_match =  xasprintf(
+                                        "eth.dst == "ETH_ADDR_FMT" && inport == %s && outport == %s",
+                                        ETH_ADDR_ARGS(exit_logical_port_ea),
+                                        output_port_array[lpc->n_port_pair_groups-1][k] ->json_key,
+                                        dst_port->json_key);
+                }
+                lcc_action = xasprintf("output;");
+                ovn_lflow_add(lflows, od, S_SWITCH_OUT_CHAIN, egress_outer_priority + priority,
+                    lcc_match, lcc_action);
+                free(lcc_match);
+                free(lcc_action);
+            }
+
+
+        } else {
+            /* Path starting from entry port, ingress */
+            lcc_match =  xasprintf( "%s", chain_match);
+            if (n_port_array[0] > 1)
+            {
+                lppg = port_pair_groups[0];
+                struct ds group_ports = DS_EMPTY_INITIALIZER;
+                ds_put_cstr(&group_ports, "childports=");
+                for (size_t k = 0; k < lppg->n_port_pairs - 1; k++) {
+                    lpp = lppg->port_pairs[k];
+                    ds_put_format(&group_ports, "\"%s\":%"PRId64",", lpp->inport->name, lpp->weight);
+                }
+                lpp = lppg->port_pairs[lppg->n_port_pairs - 1];
+                ds_put_format(&group_ports, "\"%s\":%"PRId64,
+                      lpp->inport->name, lpp->weight);
+
+                struct ds actions = DS_EMPTY_INITIALIZER;
+                ds_put_format(&actions, "fwd_group_weight(%s);", ds_cstr(&group_ports));
+                ovn_lflow_add(lflows, od, S_SWITCH_IN_CHAIN, ingress_outer_priority + priority,
+                                lcc_match, ds_cstr(&actions));
+                free(lcc_match);
+                ds_destroy(&actions);
+                ds_destroy(&group_ports);
+            } else {
+                lcc_action = xasprintf("outport = %s; output;",
+                                 input_port_array[0][0]->json_key);
+                ovn_lflow_add(lflows, od, S_SWITCH_IN_CHAIN, ingress_outer_priority + priority,
+                      lcc_match, lcc_action);
+                free(lcc_match);
+                free(lcc_action);
+            }
+
+            /* Path starting from entry port, egress table */
+            for (size_t k = 0; k < n_port_array[0] ; k++) {
+                if (strcmp(chain_match, "") != 0) {
+                    lcc_match =  xasprintf(
+                                        "outport == %s && %s",
+                                        input_port_array[0][k]->json_key,
+                                        chain_match);
+                } else {
+                    lcc_match =  xasprintf(
+                                        "outport == %s",
+                                        input_port_array[0][k]->json_key);
+                }
+                lcc_action = xasprintf("output;");
+                ovn_lflow_add(lflows, od, S_SWITCH_OUT_CHAIN, egress_outer_priority + priority,
+                    lcc_match, lcc_action);
+                free(lcc_match);
+                free(lcc_action);
             }
         }
-        ds_put_format(&actions, "next;");
-        ovn_lflow_add(lflows, od, S_SWITCH_IN_CHAIN, ingress_inner_priority,
-                      lcc_match, ds_cstr(&actions));
-        free(lcc_match);
-        ds_destroy(&actions);
-
         /*
         * Loop over all VNFs and create flow rules for each
         * Only get here when there is more than one VNF in the chain.
@@ -5922,449 +6229,250 @@ build_chain(struct ovn_datapath *od, struct hmap *lflows, struct hmap *ports)
         for (size_t j = 1; j < lpc->n_port_pair_groups; j++) {
 
             /* Apply inner rules flows */
-            if (chain_path == 0) { /* Path starting from entry port */
-                if (strcmp(chain_match, "") != 0) {
-                    lcc_match = xasprintf(
-                                    "eth.src == "ETH_ADDR_FMT" && inport == %s && %s",
-                                    ETH_ADDR_ARGS(traffic_logical_port_ea),
-                                    output_port_array[j - 1]->json_key,
-                                    chain_match);
-                    //lcc_action = xasprintf("outport = %s; output;",
-                    //                       input_port_array[j]->json_key);
-                } else{
-                    lcc_match = xasprintf(
-                                "eth.src == "ETH_ADDR_FMT" && inport == %s",
-                                ETH_ADDR_ARGS(traffic_logical_port_ea),
-                                output_port_array[j - 1]->json_key);
-                }
-            } else { /* Path going to entry port. */
-                if (strcmp(chain_match, "") != 0) {
-                    lcc_match = xasprintf(
-                                    "eth.dst == "ETH_ADDR_FMT" && inport == %s && %s",
-                                    ETH_ADDR_ARGS(traffic_logical_port_ea),
-                                    output_port_array[j - 1]->json_key,
-                                    chain_match);
-                                    //input_port_array[lpc->n_port_pair_groups - j]->json_key);
-                    //lcc_action = xasprintf("outport = %s; output;",
-                    //                       output_port_array[lpc->n_port_pair_groups - (j + 1)]->json_key);
-                }else{
-                    lcc_match = xasprintf(
-                                    "eth.dst == "ETH_ADDR_FMT" && inport == %s",
-                                    ETH_ADDR_ARGS(traffic_logical_port_ea),
-                                    output_port_array[j - 1]->json_key);
-                }
-            }
-            lcc_action = xasprintf("outport = %s; output;",
-                                    input_port_array[j]->json_key);
-            ovn_lflow_add(lflows, od, S_SWITCH_IN_CHAIN, ingress_inner_priority,
-                          lcc_match, lcc_action);
-            free(lcc_match);
-            free(lcc_action);
-        }
+            for (size_t k = 0; k < n_port_array[j - 1]; k++) {
+                if (src_port && dst_port) {
+                    if (strcmp(chain_match, "") != 0) {  
+                        lcc_match =  xasprintf(
+                                            "eth.src == "ETH_ADDR_FMT" && eth.dst == "ETH_ADDR_FMT" && inport == %s && %s",
+                                            ETH_ADDR_ARGS(entry_logical_port_ea),
+                                            ETH_ADDR_ARGS(exit_logical_port_ea),
+                                            output_port_array[j - 1][k] ->json_key, chain_match);
+                    } else {
+                        lcc_match =  xasprintf(
+                                            "eth.src == "ETH_ADDR_FMT" && eth.dst == "ETH_ADDR_FMT" && inport == %s",
+                                            ETH_ADDR_ARGS(entry_logical_port_ea),
+                                            ETH_ADDR_ARGS(exit_logical_port_ea),
+                                            output_port_array[j - 1][k] ->json_key);
+                    }
 
-        /* Update egress pipline */
-        for (size_t j = 1; j < lpc->n_port_pair_groups; j++) {
-            if (chain_path == 0) { /* Path starting from entry port */
-                if (strcmp(chain_match, "") != 0) {
-                    lcc_match = xasprintf(
-                                    "eth.src == "ETH_ADDR_FMT" && inport == %s && outport == %s && %s",
-                                    ETH_ADDR_ARGS(traffic_logical_port_ea),
-                                    output_port_array[j - 1]->json_key,
-                                    input_port_array[j]->json_key,
-                                    chain_match);
-                } else{
-                    lcc_match = xasprintf(
-                                    "eth.src == "ETH_ADDR_FMT" && inport == %s && outport == %s",
-                                    ETH_ADDR_ARGS(traffic_logical_port_ea),
-                                    output_port_array[j - 1]->json_key,
-                                    input_port_array[j]->json_key);
+                } else if (src_port && !dst_port) {
+                    if (strcmp(chain_match, "") != 0) {  
+                        lcc_match =  xasprintf(
+                                            "eth.src == "ETH_ADDR_FMT" && inport == %s && %s",
+                                            ETH_ADDR_ARGS(entry_logical_port_ea), 
+                                            output_port_array[j - 1][k] ->json_key, 
+                                            chain_match);
+                    } else {
+                        lcc_match =  xasprintf(
+                                            "eth.src == "ETH_ADDR_FMT" && inport == %s",
+                                            ETH_ADDR_ARGS(entry_logical_port_ea), 
+                                            output_port_array[j - 1][k] ->json_key);
+                    }
 
-                }
-            } else{/* Path going to entry port. */
-                if (strcmp(chain_match, "") != 0) {
-                    lcc_match = xasprintf(
-                                    "eth.dst == "ETH_ADDR_FMT" && inport == %s && outport == %s && %s",
-                                    ETH_ADDR_ARGS(traffic_logical_port_ea),
-                                    output_port_array[j - 1]->json_key,
-                                    input_port_array[j]->json_key,
-                                    chain_match);
-                } else{
-                    lcc_match = xasprintf(
-                                    "eth.dst == "ETH_ADDR_FMT" && inport == %s && outport == %s",
-                                    ETH_ADDR_ARGS(traffic_logical_port_ea),
-                                    output_port_array[j - 1]->json_key,
-                                    input_port_array[j]->json_key);
-                }
-            }
-            lcc_action = xasprintf("output;");
-            ovn_lflow_add(lflows, od, S_SWITCH_OUT_CHAIN, egress_inner_priority,
-                          lcc_match, lcc_action);
-            free(lcc_match);
-            free(lcc_action);
-        }
+                } else if (!src_port && dst_port) {
+                    if (strcmp(chain_match, "") != 0) { 
+                        lcc_match =  xasprintf(
+                                            "eth.dst == "ETH_ADDR_FMT" && inport == %s && %s",
+                                            ETH_ADDR_ARGS(exit_logical_port_ea), 
+                                            output_port_array[j - 1][k] ->json_key,
+                                            chain_match);
+                    } else {
+                        lcc_match =  xasprintf(
+                                            "eth.dst == "ETH_ADDR_FMT" && inport == %s",
+                                            ETH_ADDR_ARGS(exit_logical_port_ea),
+                                            output_port_array[j - 1][k] ->json_key);
+                    }
 
-        if (chain_path == 0) { /* Path starting from entry port */
-            if (strcmp(chain_match, "") != 0) {
-                lcc_match =  xasprintf(
-                                    "eth.src == "ETH_ADDR_FMT" && outport == %s && %s",
-                                    ETH_ADDR_ARGS(traffic_logical_port_ea), input_port_array[0]->json_key, chain_match);
-            } else{
-                lcc_match =  xasprintf(
-                                    "eth.src == "ETH_ADDR_FMT" && outport == %s",
-                                    ETH_ADDR_ARGS(traffic_logical_port_ea), input_port_array[0]->json_key);
-            }
-        } else{/* Path going to entry port. */
-            if (strcmp(chain_match, "") != 0) {
-                lcc_match =  xasprintf(
-                                    "eth.dst == "ETH_ADDR_FMT" && outport == %s && %s",
-                                    ETH_ADDR_ARGS(traffic_logical_port_ea), input_port_array[0]->json_key, chain_match);
-            } else{
-                lcc_match =  xasprintf(
-                                    "eth.dst == "ETH_ADDR_FMT" && outport == %s",
-                                    ETH_ADDR_ARGS(traffic_logical_port_ea), input_port_array[0]->json_key);
+                } else {
+                    lcc_match =  xasprintf( "%s && inport == %s", 
+                                            chain_match,
+                                            output_port_array[j - 1][k] ->json_key);
+                }
+
+                if (n_port_array[j] > 1)
+                {
+                    lppg = port_pair_groups[j+1];
+                    struct ds group_ports = DS_EMPTY_INITIALIZER;
+                    ds_put_cstr(&group_ports, "childports=");
+                    for (size_t k2 = 0; k2 < lppg->n_port_pairs - 1; k2++) {
+                        lpp = lppg->port_pairs[k2];
+                        ds_put_format(&group_ports, "\"%s\":%"PRId64",", lpp->inport->name, lpp->weight);
+                    }
+                    lpp = lppg->port_pairs[lppg->n_port_pairs - 1];
+                    ds_put_format(&group_ports, "\"%s\":%"PRId64,
+                        lpp->inport->name, lpp->weight);
+
+                    struct ds actions = DS_EMPTY_INITIALIZER;
+                    ds_put_format(&actions, "fwd_group_weight(%s);", ds_cstr(&group_ports));
+                    ovn_lflow_add(lflows, od, S_SWITCH_IN_CHAIN, ingress_outer_priority + priority,
+                                    lcc_match, ds_cstr(&actions));
+
+                    free(lcc_match);
+                    ds_destroy(&actions);
+                    ds_destroy(&group_ports);
+                    
+                } else {
+                    lcc_action = xasprintf("outport = %s; output;",
+                                    input_port_array[j][0]->json_key);
+                    ovn_lflow_add(lflows, od, S_SWITCH_IN_CHAIN, ingress_inner_priority + priority,
+                        lcc_match, lcc_action);
+                    free(lcc_match);
+                    free(lcc_action);
+                }
+            
+                /* Update egress pipline */
+                for (size_t k2 = 0; k2 < n_port_array[j]; k2++) {
+                    if (src_port && dst_port) {
+                        if (strcmp(chain_match, "") != 0) {  
+                            lcc_match =  xasprintf(
+                                                "eth.src == "ETH_ADDR_FMT" && eth.dst == "ETH_ADDR_FMT" && inport == %s && outport == %s && %s",
+                                                ETH_ADDR_ARGS(entry_logical_port_ea),
+                                                ETH_ADDR_ARGS(exit_logical_port_ea),
+                                                output_port_array[j - 1][k] ->json_key, 
+                                                input_port_array[j][k2] ->json_key,
+                                                chain_match);
+                        } else {
+                            lcc_match =  xasprintf(
+                                                "eth.src == "ETH_ADDR_FMT" && eth.dst == "ETH_ADDR_FMT" && inport == %s && outport == %s",
+                                                ETH_ADDR_ARGS(entry_logical_port_ea),
+                                                ETH_ADDR_ARGS(exit_logical_port_ea),
+                                                output_port_array[j - 1][k] ->json_key,
+                                                input_port_array[j][k2] ->json_key);
+                        }
+
+                    } else if (src_port && !dst_port) {
+                        if (strcmp(chain_match, "") != 0) {  
+                            lcc_match =  xasprintf(
+                                                "eth.src == "ETH_ADDR_FMT" && inport == %s && outport == %s && %s",
+                                                ETH_ADDR_ARGS(entry_logical_port_ea), 
+                                                output_port_array[j - 1][k] ->json_key, 
+                                                input_port_array[j][k2] ->json_key,
+                                                chain_match);
+                        } else {
+                            lcc_match =  xasprintf(
+                                                "eth.src == "ETH_ADDR_FMT" && inport == %s && outport == %s",
+                                                ETH_ADDR_ARGS(entry_logical_port_ea), 
+                                                output_port_array[j - 1][k] ->json_key,
+                                                input_port_array[j][k2] ->json_key);
+                        }
+
+                    } else if (!src_port && dst_port) {
+                        if (strcmp(chain_match, "") != 0) { 
+                            lcc_match =  xasprintf(
+                                                "eth.dst == "ETH_ADDR_FMT" && inport == %s && outport == %s && %s",
+                                                ETH_ADDR_ARGS(exit_logical_port_ea), 
+                                                output_port_array[j - 1][k] ->json_key,
+                                                input_port_array[j][k2] ->json_key,
+                                                chain_match);
+                        } else {
+                            lcc_match =  xasprintf(
+                                                "eth.dst == "ETH_ADDR_FMT" && inport == %s && outport == %s",
+                                                ETH_ADDR_ARGS(exit_logical_port_ea),
+                                                output_port_array[j - 1][k] ->json_key,
+                                                input_port_array[j][k2] ->json_key);
+                        }
+
+                    } else {
+                        lcc_match =  xasprintf( "%s && inport == %s && outport == %s", 
+                        chain_match,
+                        output_port_array[j - 1][k] ->json_key,
+                        input_port_array[j][k2] ->json_key);
+                    }
+
+                    lcc_action = xasprintf("output;");
+                    ovn_lflow_add(lflows, od, S_SWITCH_OUT_CHAIN, egress_inner_priority + priority,
+                                lcc_match, lcc_action);
+                    free(lcc_match);
+                    free(lcc_action);
+                }
             }
         }
-        lcc_action = xasprintf("output;");
-        ovn_lflow_add(lflows, od, S_SWITCH_OUT_CHAIN, egress_outer_priority,
-                          lcc_match, lcc_action);
-        free(lcc_match);
-        free(lcc_action);
 
         /* Insert to S_SWITCH_IN_PORT_SEC_L2 avoid dropping */
         for (size_t j = 0; j < lpc->n_port_pair_groups; j++) {
-            struct ds actions_l2 = DS_EMPTY_INITIALIZER;
-            if (chain_path == 0) { /* Path starting from entry port */
-                if (strcmp(chain_match, "") != 0) {
-                    lcc_match = xasprintf(
-                                    "eth.src == "ETH_ADDR_FMT" && inport == %s && %s",
-                                    ETH_ADDR_ARGS(traffic_logical_port_ea),
-                                    output_port_array[j]->json_key,
-                                    chain_match);
-                } else{
-                    lcc_match = xasprintf(
-                                    "eth.src == "ETH_ADDR_FMT" && inport == %s",
-                                    ETH_ADDR_ARGS(traffic_logical_port_ea),
-                                    output_port_array[j]->json_key);
+            for (size_t k = 0; k < n_port_array[j]; k++)
+            {
+                struct ds actions_l2 = DS_EMPTY_INITIALIZER;
+                if (src_port && dst_port) {
+                    if (strcmp(chain_match, "") != 0) {  
+                        lcc_match =  xasprintf(
+                                            "eth.src == "ETH_ADDR_FMT" && eth.dst == "ETH_ADDR_FMT" && inport == %s && %s",
+                                            ETH_ADDR_ARGS(entry_logical_port_ea),
+                                            ETH_ADDR_ARGS(exit_logical_port_ea),
+                                            output_port_array[j][k] ->json_key, chain_match);
+                    } else {
+                        lcc_match =  xasprintf(
+                                            "eth.src == "ETH_ADDR_FMT" && eth.dst == "ETH_ADDR_FMT" && inport == %s",
+                                            ETH_ADDR_ARGS(entry_logical_port_ea),
+                                            ETH_ADDR_ARGS(exit_logical_port_ea),
+                                            output_port_array[j][k] ->json_key);
+                    }
+                } else if (src_port && !dst_port) {
+                    if (strcmp(chain_match, "") != 0) {  
+                        lcc_match =  xasprintf(
+                                            "eth.src == "ETH_ADDR_FMT" && inport == %s && %s",
+                                            ETH_ADDR_ARGS(entry_logical_port_ea), output_port_array[j][k] ->json_key, chain_match);
+                    } else {
+                        lcc_match =  xasprintf(
+                                            "eth.src == "ETH_ADDR_FMT" && inport == %s",
+                                            ETH_ADDR_ARGS(entry_logical_port_ea), output_port_array[j][k] ->json_key);
+                    }
+                } else if (!src_port && dst_port) {
+                    if (strcmp(chain_match, "") != 0) { 
+                        lcc_match =  xasprintf(
+                                            "eth.dst == "ETH_ADDR_FMT" && inport == %s && %s",
+                                            ETH_ADDR_ARGS(exit_logical_port_ea), output_port_array[j][k] ->json_key, chain_match);
+                    } else {
+                        lcc_match =  xasprintf(
+                                            "eth.dst == "ETH_ADDR_FMT" && inport == %s",
+                                            ETH_ADDR_ARGS(exit_logical_port_ea), output_port_array[j][k] ->json_key);
+                    }
+                } else {
+                    lcc_match =  xasprintf( "%s && inport == %s", chain_match, output_port_array[j][k] ->json_key);
                 }
-            } else{/* Path going to entry port. */
-                if (strcmp(chain_match, "") != 0) {
-                    lcc_match = xasprintf(
-                                    "eth.dst == "ETH_ADDR_FMT" && inport == %s && %s",
-                                    ETH_ADDR_ARGS(traffic_logical_port_ea),
-                                    output_port_array[j]->json_key,
-                                    chain_match);
-                } else{
-                    lcc_match = xasprintf(
-                                    "eth.dst == "ETH_ADDR_FMT" && inport == %s",
-                                    ETH_ADDR_ARGS(traffic_logical_port_ea),
-                                    output_port_array[j]->json_key);
-                }
+                ds_put_format(&actions_l2, "next;");
+                ovn_lflow_add(lflows, od, S_SWITCH_IN_PORT_SEC_L2, 30,
+                            lcc_match, ds_cstr(&actions_l2));
+                free(lcc_match);
+                ds_destroy(&actions_l2);
             }
-            ds_put_format(&actions_l2, "next;");
-            ovn_lflow_add(lflows, od, S_SWITCH_IN_PORT_SEC_L2, 30,
-                        lcc_match, ds_cstr(&actions_l2));
-            free(lcc_match);
-            ds_destroy(&actions_l2);
         }
 
         /* Exclude ARP and ND */
         struct ds actions_ex = DS_EMPTY_INITIALIZER;
-        if (chain_path == 0) {
-            if (strcmp(chain_match, "") != 0) {  /* Path starting from entry port */
+        if (src_port && dst_port) {
+            if (strcmp(chain_match, "") != 0) {  
                 lcc_match =  xasprintf(
-                                 "eth.src == "ETH_ADDR_FMT" && (arp || nd) && %s",
-                                 ETH_ADDR_ARGS(traffic_logical_port_ea), chain_match);
-
+                                    "eth.src == "ETH_ADDR_FMT" && eth.dst == "ETH_ADDR_FMT" && inport == %s && (arp || nd)  && %s",
+                                    ETH_ADDR_ARGS(entry_logical_port_ea),
+                                    ETH_ADDR_ARGS(exit_logical_port_ea),
+                                    src_port ->json_key, chain_match);
             } else {
                 lcc_match =  xasprintf(
-                                 "eth.src == "ETH_ADDR_FMT" && (arp || nd)",
-                                 ETH_ADDR_ARGS(traffic_logical_port_ea));
+                                    "eth.src == "ETH_ADDR_FMT" && eth.dst == "ETH_ADDR_FMT" && (arp || nd)  && inport == %s",
+                                    ETH_ADDR_ARGS(entry_logical_port_ea),
+                                    ETH_ADDR_ARGS(exit_logical_port_ea),
+                                    src_port ->json_key);
             }
-        } else { /* Path starting from exit port */
-            if (strcmp(chain_match, "") != 0) {
+        } else if (src_port && !dst_port) {
+            if (strcmp(chain_match, "") != 0) {  
                 lcc_match =  xasprintf(
-                                 "eth.dst == "ETH_ADDR_FMT" && (arp || nd) && %s",
-                                 ETH_ADDR_ARGS(traffic_logical_port_ea), chain_match);
+                                    "eth.src == "ETH_ADDR_FMT" && inport == %s && (arp || nd) && %s",
+                                    ETH_ADDR_ARGS(entry_logical_port_ea), src_port ->json_key, chain_match);
             } else {
                 lcc_match =  xasprintf(
-                                 "eth.dst == "ETH_ADDR_FMT" && (arp || nd)",
-                                 ETH_ADDR_ARGS(traffic_logical_port_ea));
+                                    "eth.src == "ETH_ADDR_FMT" && inport == %s && (arp || nd)",
+                                    ETH_ADDR_ARGS(entry_logical_port_ea), src_port ->json_key);
             }
+        } else if (!src_port && dst_port) {
+            if (strcmp(chain_match, "") != 0) { 
+                lcc_match =  xasprintf(
+                                    "eth.dst == "ETH_ADDR_FMT" && (arp || nd) && %s",
+                                    ETH_ADDR_ARGS(exit_logical_port_ea), chain_match);
+            } else {
+                lcc_match =  xasprintf(
+                                    "eth.dst == "ETH_ADDR_FMT" && (arp || nd)",
+                                    ETH_ADDR_ARGS(exit_logical_port_ea));
+            }
+        } else {
+            lcc_match =  xasprintf( "%s && (arp || nd)", chain_match);
         }
         ds_put_format(&actions_ex, "next;");
-        ovn_lflow_add(lflows, od, S_SWITCH_IN_CHAIN, 200,
+        ovn_lflow_add(lflows, od, S_SWITCH_IN_CHAIN, exclude_arp_nd + priority,
                       lcc_match, ds_cstr(&actions_ex));
         free(lcc_match);
         ds_destroy(&actions_ex);
-
-        /* bi-directional chain (Response)*/
-        if (chain_direction == 1) {
-            /*
-             * Insert the lowest priorty rule dest is src-logical-port
-             */
-            if (chain_path == 0) { /* Path from destination port. */
-                if (strcmp(chain_match, "") != 0) {
-                    lcc_match =  xasprintf("eth.dst == "ETH_ADDR_FMT" && %s",
-                                           ETH_ADDR_ARGS(traffic_logical_port_ea), chain_match);
-                } else {
-                    lcc_match =  xasprintf("eth.dst == "ETH_ADDR_FMT,
-                                           ETH_ADDR_ARGS(traffic_logical_port_ea));
-                }
-                //lcc_action = xasprintf("outport = %s; output;",
-                //                      output_port_array[lpc->n_port_pair_groups - 1]->json_key);
-            } else { /* Path from source port. */
-                if (strcmp(chain_match, "") != 0) {
-                    lcc_match =  xasprintf("eth.src == "ETH_ADDR_FMT" && %s",
-                                           ETH_ADDR_ARGS(traffic_logical_port_ea), chain_match);
-                } else {
-                    lcc_match =  xasprintf("eth.src == "ETH_ADDR_FMT,
-                                           ETH_ADDR_ARGS(traffic_logical_port_ea));
-                }
-                //lcc_action = xasprintf("outport = %s;  output;",
-                //                      input_port_array[0]->json_key);
-            }
-            lcc_action = xasprintf("outport = %s; output;",
-                                    input_port_array[lpc->n_port_pair_groups - 1]->json_key);
-            ovn_lflow_add(lflows, od, S_SWITCH_IN_CHAIN, ingress_outer_priority,
-                          lcc_match, lcc_action);
-            free(lcc_match);
-            free(lcc_action);
-            /*
-            * End Entry Flow to classification chain entry point.
-            */
-            struct ds new_actions = DS_EMPTY_INITIALIZER;
-            /* Apply last rule to exit from chain */
-            if (chain_path == 0) { /* Path from destination port. */
-                if (strcmp(chain_match, "") != 0) {
-                    lcc_match = xasprintf(
-                                    "eth.dst == "ETH_ADDR_FMT" && inport == %s && %s",
-                                    ETH_ADDR_ARGS(traffic_logical_port_ea),
-                                    output_port_array[0]->json_key, chain_match);
-                                    //input_port_array[0]->json_key);
-                    //ds_put_format(&new_actions, "next;");
-                    //ovn_lflow_add(lflows, od, S_SWITCH_IN_CHAIN,
-                    //              egress_inner_priority, lcc_match, ds_cstr(&new_actions));
-                } else{
-                    lcc_match = xasprintf(
-                                    "eth.dst == "ETH_ADDR_FMT" && inport == %s",
-                                    ETH_ADDR_ARGS(traffic_logical_port_ea),
-                                    output_port_array[0]->json_key);
-                }
-            } else { /* Path to source port. */
-                if (strcmp(chain_match, "") != 0) {
-                    lcc_match = xasprintf(
-                                    "eth.src == "ETH_ADDR_FMT" && inport == %s && %s",
-                                    ETH_ADDR_ARGS(traffic_logical_port_ea),
-                                    output_port_array[0]->json_key, chain_match);
-                    //VLOG_INFO("Target Port Name: %s", target_port_name);
-                    //ds_put_format(&new_actions, "clone { ct_clear; "
-                    //              "inport = \"%s\"; outport= \"\"; "
-                    //              "flags = 0; ", target_port_name);
-
-                    //for (int ii = 0; ii < MFF_N_LOG_REGS; ii++) {
-                    //    ds_put_format(&new_actions, "reg%d = 0; ", ii);
-                    //}
-
-                    //ds_put_format(&new_actions, "next(pipeline=ingress, table=%d); }; ",
-                    //              ovn_stage_get_table(S_SWITCH_IN_CHAIN) + 1);
-                    //ovn_lflow_add(lflows, od, S_SWITCH_OUT_CHAIN,
-                    //              egress_inner_priority, lcc_match, ds_cstr(&new_actions));
-                } else{
-                    lcc_match = xasprintf(
-                                    "eth.src == "ETH_ADDR_FMT" && inport == %s",
-                                    ETH_ADDR_ARGS(traffic_logical_port_ea),
-                                    output_port_array[0]->json_key);
-                }
-
-            }
-            ds_put_format(&new_actions, "next;");
-            ovn_lflow_add(lflows, od, S_SWITCH_IN_CHAIN,
-                            ingress_inner_priority, lcc_match, ds_cstr(&new_actions));
-
-            ds_destroy(&new_actions);
-            free(lcc_match);
-
-            for (int j = 1; j < lpc->n_port_pair_groups; j++) {
-
-                /* Completed first catch all rule for this port-chain. */
-
-                /* Apply inner rules flows */
-                if (chain_path == 0) { /* Path from destination port. */
-                    if (strcmp(chain_match, "") != 0) {
-                        lcc_match = xasprintf(
-                                        "eth.dst == "ETH_ADDR_FMT" && inport == %s && %s",
-                                        ETH_ADDR_ARGS(traffic_logical_port_ea),
-                                        output_port_array[lpc->n_port_pair_groups - j]->json_key, chain_match);
-                                        //input_port_array[lpc->n_port_pair_groups - j]->json_key);
-                        //lcc_action = xasprintf("outport = %s; output;",
-                                                //input_port_array[lpc->n_port_pair_groups - j - 1]->json_key);
-                                            //output_port_array[lpc->n_port_pair_groups - (j + 1)]->json_key);
-                    } else{
-                        lcc_match = xasprintf(
-                                        "eth.dst == "ETH_ADDR_FMT" && inport == %s",
-                                        ETH_ADDR_ARGS(traffic_logical_port_ea),
-                                        output_port_array[lpc->n_port_pair_groups - j]->json_key);
-                    }
-
-                } else { /* Path from source port. */
-                    if (strcmp(chain_match, "") != 0) {
-                        lcc_match = xasprintf(
-                                        "eth.src == "ETH_ADDR_FMT" && inport == %s && %s",
-                                        ETH_ADDR_ARGS(traffic_logical_port_ea),
-                                        output_port_array[lpc->n_port_pair_groups - j]->json_key, chain_match);
-                                        //output_port_array[j - 1]->json_key);
-                        //lcc_action = xasprintf("outport = %s; output;",
-                        //                       input_port_array[j]->json_key);
-                    } else{
-                        lcc_match = xasprintf(
-                                        "eth.src == "ETH_ADDR_FMT" && inport == %s",
-                                        ETH_ADDR_ARGS(traffic_logical_port_ea),
-                                        output_port_array[lpc->n_port_pair_groups - j]->json_key);
-                    }
-                }
-                lcc_action = xasprintf("outport = %s; output;",
-                                        input_port_array[lpc->n_port_pair_groups - j - 1]->json_key);
-                ovn_lflow_add(lflows, od, S_SWITCH_IN_CHAIN,
-                              ingress_inner_priority, lcc_match, lcc_action);
-                free(lcc_match);
-                free(lcc_action);
-            }
-
-            for (size_t j = 1; j < lpc->n_port_pair_groups; j++) {
-                if (chain_path == 0) { /* Path from destination port. */
-                    if (strcmp(chain_match, "") != 0) {
-                        lcc_match = xasprintf(
-                                        "eth.dst == "ETH_ADDR_FMT" && inport == %s && outport == %s && %s",
-                                        ETH_ADDR_ARGS(traffic_logical_port_ea),
-                                        output_port_array[lpc->n_port_pair_groups - j]->json_key,
-                                        input_port_array[lpc->n_port_pair_groups - j - 1]->json_key,
-                                        chain_match);
-                    } else{
-                        lcc_match = xasprintf(
-                                        "eth.dst == "ETH_ADDR_FMT" && inport == %s && outport == %s",
-                                        ETH_ADDR_ARGS(traffic_logical_port_ea),
-                                        output_port_array[lpc->n_port_pair_groups - j]->json_key,
-                                        input_port_array[lpc->n_port_pair_groups - j - 1]->json_key);
-
-                    }
-                } else{ /* Path from source port. */
-                    if (strcmp(chain_match, "") != 0) {
-                        lcc_match = xasprintf(
-                                        "eth.src == "ETH_ADDR_FMT" && inport == %s && outport == %s && %s",
-                                        ETH_ADDR_ARGS(traffic_logical_port_ea),
-                                        output_port_array[lpc->n_port_pair_groups - j]->json_key,
-                                        input_port_array[lpc->n_port_pair_groups - j - 1]->json_key,
-                                        chain_match);
-                    } else{
-                        lcc_match = xasprintf(
-                                        "eth.src == "ETH_ADDR_FMT" && inport == %s && outport == %s",
-                                        ETH_ADDR_ARGS(traffic_logical_port_ea),
-                                        output_port_array[lpc->n_port_pair_groups - j]->json_key,
-                                        input_port_array[lpc->n_port_pair_groups - j - 1]->json_key);
-                    }
-                }
-                lcc_action = xasprintf("output;");
-                ovn_lflow_add(lflows, od, S_SWITCH_OUT_CHAIN, egress_inner_priority,
-                            lcc_match, lcc_action);
-                free(lcc_match);
-                free(lcc_action);
-            }
         
-
-            if (chain_path == 0) { /* Path from destination port. */
-                if (strcmp(chain_match, "") != 0) {
-                    lcc_match =  xasprintf(
-                                        "eth.dst == "ETH_ADDR_FMT" && outport == %s && %s",
-                                        ETH_ADDR_ARGS(traffic_logical_port_ea), input_port_array[lpc->n_port_pair_groups - 1]->json_key, chain_match);
-                } else{
-                    lcc_match =  xasprintf(
-                                        "eth.dst == "ETH_ADDR_FMT" && outport == %s",
-                                        ETH_ADDR_ARGS(traffic_logical_port_ea), input_port_array[lpc->n_port_pair_groups - 1]->json_key);
-                }
-            } else{ /* Path from source port. */
-                if (strcmp(chain_match, "") != 0) {
-                    lcc_match =  xasprintf(
-                                        "eth.src == "ETH_ADDR_FMT" && outport == %s && %s",
-                                        ETH_ADDR_ARGS(traffic_logical_port_ea), input_port_array[lpc->n_port_pair_groups - 1]->json_key, chain_match);
-                } else{
-                    lcc_match =  xasprintf(
-                                        "eth.src == "ETH_ADDR_FMT" && outport == %s",
-                                        ETH_ADDR_ARGS(traffic_logical_port_ea), input_port_array[lpc->n_port_pair_groups - 1]->json_key);
-                }
-            }
-            lcc_action = xasprintf("output;");
-            ovn_lflow_add(lflows, od, S_SWITCH_OUT_CHAIN, egress_outer_priority,
-                            lcc_match, lcc_action);
-            free(lcc_match);
-            free(lcc_action);
-
-            /* Insert to S_SWITCH_IN_PORT_SEC_L2 avoid dropping */
-            for (size_t j = 0; j < lpc->n_port_pair_groups; j++) {
-                struct ds new_actions_l2 = DS_EMPTY_INITIALIZER;
-                if (chain_path == 0) { /* Path starting from entry port */
-                    if (strcmp(chain_match, "") != 0) {
-                        lcc_match = xasprintf(
-                                        "eth.dst == "ETH_ADDR_FMT" && inport == %s && %s",
-                                        ETH_ADDR_ARGS(traffic_logical_port_ea),
-                                        output_port_array[j]->json_key,
-                                        chain_match);
-                    } else{
-                        lcc_match = xasprintf(
-                                        "eth.dst == "ETH_ADDR_FMT" && inport == %s",
-                                        ETH_ADDR_ARGS(traffic_logical_port_ea),
-                                        output_port_array[j]->json_key);
-                    }
-                } else{/* Path going to entry port. */
-                    if (strcmp(chain_match, "") != 0) {
-                        lcc_match = xasprintf(
-                                        "eth.src == "ETH_ADDR_FMT" && inport == %s && %s",
-                                        ETH_ADDR_ARGS(traffic_logical_port_ea),
-                                        output_port_array[j]->json_key,
-                                        chain_match);
-                    } else{
-                        lcc_match = xasprintf(
-                                        "eth.src == "ETH_ADDR_FMT" && inport == %s",
-                                        ETH_ADDR_ARGS(traffic_logical_port_ea),
-                                        output_port_array[j]->json_key);
-                    }
-                }
-                ds_put_format(&new_actions_l2, "next;");
-                ovn_lflow_add(lflows, od, S_SWITCH_IN_PORT_SEC_L2, 30,
-                            lcc_match, ds_cstr(&new_actions_l2));
-                free(lcc_match);
-                ds_destroy(&new_actions_l2);
-            }
-
-            /* Exclude ARP and ND */
-            struct ds new_actions_ex = DS_EMPTY_INITIALIZER;
-            if (chain_path == 0) { /* Path starting from exit port */
-                if (strcmp(chain_match, "") != 0) {  
-                    lcc_match =  xasprintf(
-                                    "eth.dst == "ETH_ADDR_FMT" && (arp || nd) && %s",
-                                    ETH_ADDR_ARGS(traffic_logical_port_ea), chain_match);
-
-                } else {
-                    lcc_match =  xasprintf(
-                                    "eth.dst == "ETH_ADDR_FMT" && (arp || nd)",
-                                    ETH_ADDR_ARGS(traffic_logical_port_ea));
-                }
-            } else { /* Path starting from entry port */
-                if (strcmp(chain_match, "") != 0) {
-                    lcc_match =  xasprintf(
-                                    "eth.src == "ETH_ADDR_FMT" && (arp || nd) && %s",
-                                    ETH_ADDR_ARGS(traffic_logical_port_ea), chain_match);
-                } else {
-                    lcc_match =  xasprintf(
-                                    "eth.src == "ETH_ADDR_FMT" && (arp || nd)",
-                                    ETH_ADDR_ARGS(traffic_logical_port_ea));
-                }
-            }
-            ds_put_format(&new_actions_ex, "next;");
-            ovn_lflow_add(lflows, od, S_SWITCH_IN_CHAIN, 200,
-                        lcc_match, ds_cstr(&new_actions_ex));
-            free(lcc_match);
-            ds_destroy(&new_actions_ex);
-        }
         free(input_port_array);
         free(output_port_array);
         free(port_pair_groups);
