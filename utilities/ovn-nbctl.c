@@ -1987,8 +1987,17 @@ nbctl_lsp_chain_classifier_add(struct ctl_context *ctx)//SWITCH, CHAIN, [MATCH],
     }
 
     const char *lsp_chain_classifier_match = ctx->argc > 3 ? ctx->argv[3] : NULL;
+    if (strcmp(lsp_chain_classifier_match, "\'\'") == 0 || strcmp(lsp_chain_classifier_match, "\"\"") == 0)
+    {
+        lsp_chain_classifier_match = NULL;
+    }
 
     const char *lsp_input_arg = ctx->argc > 4 ? ctx->argv[4] : NULL;
+    if (strcmp(lsp_input_arg, "\'\'") == 0 || strcmp(lsp_input_arg, "\"\"") == 0)
+    {
+        lsp_input_arg = NULL;
+    }
+    
     if(lsp_input_arg && strcmp(lsp_input_arg, "") != 0) {
         error = lsp_by_name_or_uuid(ctx, ctx->argv[4], true, &lsp_input);
         if (error) {
@@ -2005,6 +2014,11 @@ nbctl_lsp_chain_classifier_add(struct ctl_context *ctx)//SWITCH, CHAIN, [MATCH],
     
 
     const char *lsp_output_arg = ctx->argc > 5 ? ctx->argv[5] : NULL;
+    if (strcmp(lsp_output_arg, "\'\'") == 0 || strcmp(lsp_output_arg, "\"\"") == 0)
+    {
+        lsp_output_arg = NULL;
+    }
+
     if(lsp_output_arg && strcmp(lsp_output_arg, "") != 0){
         error = lsp_by_name_or_uuid(ctx, ctx->argv[5], true, &lsp_output);
         if (error) {
